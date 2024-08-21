@@ -1137,6 +1137,57 @@ LogicalResult mlir::affine::replaceAllMemRefUsesWith(
   unsigned memRefOperandPos = usePositions.front();
 
   OpBuilder builder(op);
+
+  // handeling the case where the Op is memref loadOp
+  auto memRefLoad = dyn_cast<memref::LoadOp>(op);
+  if (memRefLoad) {
+    SmallVector<Value, 4> remapOperands;
+
+        remapOperands.append(extraOperands.begin(), extraOperands.end());
+    // Current Indices starts at memRefOperandPos+1
+    remapOperands.append(op->operand_begin() + memRefOperandPos + 1,
+                         op->operand_begin() + memRefOperandPos + 1 +
+                             indexRemap.getNumInputs());
+    remapOperands.append(symbolOperands.begin(), symbolOperands.end());
+
+    SmallVector<Value, 4> remapOutputs, affineApplyOps;
+
+    if (indexRemap && indexRemap != builder.getMultiDimIdentityMap(
+                                        indexRemap.getNumDims())) {
+      // Needs remapping
+      for (auto resultExpr : indexRemap.getResults()) {
+        auto singleResMap = AffineMap::get(
+            indexRemap.getNumDims(), indexRemap.getNumSymbols(), resultExpr);
+        auto afOp = builder.create<AffineApplyOp>(op->getLoc(), singleResMap,
+                                                  remapOperands);
+        remapOutputs.push_back(afOp);
+        affineApplyOps.push_back(afOp);
+      }
+    } else {
+      // No remapping needed
+      remapOutputs.assign(remapOperands.begin(), remapOperands.end());
+    }
+
+    SmallVector<Value, 4> newMapOperands;
+
+    // Add "extraIndices"
+    for (Value extraIndex : extraIndices) {
+      newMapOperands.push_back(extraIndex);
+    }
+
+    // Add "remapOutputs"
+    newMapOperands.append(remapOutputs.begin(), remapOutputs.end());
+
+    // Create new Op and replace old Op
+    auto repOp =
+        builder.create<memref::LoadOp>(op->getLoc(), newMemRef, newMapOperands,
+                                       memRefLoad.getNontemporalAttr());
+    op->replaceAllUsesWith(repOp);
+    op->erase();
+
+    return success();
+  }
+
   // The following checks if op is dereferencing memref and performs the access
   // index rewrites.
   auto affMapAccInterface = dyn_cast<AffineMapAccessInterface>(op);
